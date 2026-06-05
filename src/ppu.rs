@@ -757,7 +757,7 @@ impl Ppu {
         Ppu {
             chrrom: chrrom,
             vram: cell_zero(),
-            oam: cell_zero(),
+            oam: Cell::new([0xEF; 0x0100]),
             palette: cell_zero(),
             addr: Cell::default(),
             ctrl: Cell::default(),

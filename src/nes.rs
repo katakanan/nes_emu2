@@ -182,7 +182,7 @@ impl Nes {
         let target_addr_start = self.ppu.oamaddr.get() as u16;
         let mut oam = self.ppu.oam.get();
 
-        for i in 0x00..0xFF {
+        for i in 0x00..=0xFF {
             let source_addr = ((page as u16) << 8) | i;
             let byte = self.read8(source_addr);
 
