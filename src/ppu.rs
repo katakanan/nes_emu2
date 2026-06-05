@@ -167,6 +167,16 @@ impl Ppu {
                                             nes,
                                         );
 
+                                    // Sprite 0 hit detection
+                                    let sprite_output_units = nes.ppu.sprite_output_units.get();
+                                    let is_sprite0_active = sprite_output_units
+                                        .first()
+                                        .map(|u| u.x == 0 && (u.sprite_lsbits & 0x80 != 0 || u.sprite_msbits & 0x80 != 0))
+                                        .unwrap_or(false);
+                                    if bg_color_sel != 0 && sp_color_sel != 0 && is_sprite0_active && x < 255 {
+                                        nes.ppu.status.update(|s| s | PpuStatus::ZERO_HIT);
+                                    }
+
                                     let (color_sel, palette_sel) =
                                         match (bg_color_sel, sp_color_sel) {
                                             _ if bg_color_sel == 0 && sp_color_sel == 0 => (0, 0),
@@ -784,7 +794,8 @@ impl Ppu {
         match reg {
             2 => {
                 let ret = self.status.get().bits();
-                //reset  latch
+                // Reading $2002 clears VBlank flag and resets address latch
+                self.status.update(|s| s & !PpuStatus::VBLANK_STARTED);
                 self.latch.set(false);
                 ret
             }
