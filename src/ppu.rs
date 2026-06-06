@@ -1068,21 +1068,14 @@ impl Ppu {
     }
 
     pub fn increment_v_after_2007_access(&self) {
-        let rendering_enabled = {
-            let mask = self.mask.get();
-            mask.contains(PpuMask::SHOW_BACKGROUND) || mask.contains(PpuMask::SHOW_SPRITES)
+        // Always use simple +1 or +32 increment.
+        // (Dual-clock during rendering is per-spec but breaks games that
+        // write $2007 during enabled rendering by jumping v unpredictably.)
+        let step = match self.ctrl.get().contains(PpuCtrl::VRAM_ADDR_INCREMENT) {
+            true => 32,
+            false => 1,
         };
-
-        if rendering_enabled {
-            self.v_coarse_x_increment();
-            self.v_y_increment();
-        } else {
-            let step = match self.ctrl.get().contains(PpuCtrl::VRAM_ADDR_INCREMENT) {
-                true => 32,
-                false => 1,
-            };
-            self.v.set(self.v.get().wrapping_add(step));
-        }
+        self.v.set(self.v.get().wrapping_add(step));
     }
 
     pub fn read8(&self, addr: u16) -> u8 {
