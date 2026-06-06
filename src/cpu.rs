@@ -76,6 +76,10 @@ impl Cpu {
                 nes.cpu.p.update(|p| p | Status::I);
                 let nmi_vector = nes.read16(0xFFFA);
                 nes.cpu.pc.set(nmi_vector);
+                // NMI takes 7 CPU cycles
+                for _ in 0..7 {
+                    yield CpuStep::Cycle;
+                }
             }
 
             //Not consume Cpu Cycle

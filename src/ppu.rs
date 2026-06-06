@@ -31,6 +31,7 @@ pub struct Ppu {
     pub status: Cell<PpuStatus>,
     pub oamaddr: Cell<u8>,
     pub scroll: Cell<u16>,
+    pub scroll_snapshot: Cell<u16>, // scroll value latched at VBlank for each frame
     pub latch: Cell<bool>,
     pub img: RefCell<image::ImageBuffer<image::Rgba<u8>, Vec<u8>>>,
     pub data_buf2006: Cell<u8>,
@@ -259,6 +260,8 @@ impl Ppu {
                                     nes.ppu.status.update(|status| {
                                         status & !(PpuStatus::VBLANK_STARTED | PpuStatus::ZERO_HIT)
                                     });
+                                    // Reset split flag for new frame, latch VBlank scroll
+                                    nes.ppu.scroll_snapshot.set(nes.ppu.scroll.get());
                                 }
                                 yield RenderStep::Cycle(frame, x, y);
                             }
@@ -358,7 +361,7 @@ impl Ppu {
     pub fn calc_bg_pixel_color_sel(nes: &Nes) -> usize {
         let hi_byte = nes.ppu.nt_shift_reg_hi.get();
         let lo_byte = nes.ppu.nt_shift_reg_lo.get();
-        let fine_x = (nes.ppu.scroll.get() & 0x07) as u32;
+        let fine_x = (nes.ppu.scroll_snapshot.get() & 0x07) as u32;
         let mask = 0x8000_0000u32 >> fine_x;
         let hi_bit = (hi_byte & mask) != 0;
         let lo_bit = (lo_byte & mask) != 0;
@@ -375,7 +378,7 @@ impl Ppu {
     pub fn calc_bg_pixel_palette_sel(nes: &Nes) -> usize {
         let hi_byte = nes.ppu.at_shift_reg_hi.get();
         let lo_byte = nes.ppu.at_shift_reg_lo.get();
-        let fine_x = (nes.ppu.scroll.get() & 0x07) as u32;
+        let fine_x = (nes.ppu.scroll_snapshot.get() & 0x07) as u32;
         let mask = 0x8000_0000u32 >> fine_x;
         let hi_bit = (hi_byte & mask) != 0;
         let lo_bit = (lo_byte & mask) != 0;
@@ -485,7 +488,7 @@ impl Ppu {
     }
 
     pub fn calc_ld_at_addr(nes: &Nes, ld_x: u32, ld_y: u32) -> u16 {
-        let scroll = nes.ppu.scroll.get();
+        let scroll = nes.ppu.scroll_snapshot.get();
         let scroll_x = (scroll & 0x00FF) as u32;
         let scroll_y = (scroll >> 8) as u32;
 
@@ -535,7 +538,7 @@ impl Ppu {
     }
 
     pub fn calc_ld_nt_addr(nes: &Nes, ld_x: u32, ld_y: u32) -> u16 {
-        let scroll = nes.ppu.scroll.get();
+        let scroll = nes.ppu.scroll_snapshot.get();
         let scroll_x = (scroll & 0x00FF) as u32;
         let scroll_y = (scroll >> 8) as u32;
 
@@ -555,7 +558,7 @@ impl Ppu {
     }
 
     pub fn calc_nt_sprite_addr(nes: &Nes, _ld_x: u32, ld_y: u32, sprite_index: u8) -> u16 {
-        let scroll_y = (nes.ppu.scroll.get() >> 8) as u32;
+        let scroll_y = (nes.ppu.scroll_snapshot.get() >> 8) as u32;
         let nt_pattern_dy = ((ld_y + scroll_y) % 8) as u16;
         let nt_pattern_id = (sprite_index as u16) << 4;
         let nt_offset_addr = (nes
@@ -820,6 +823,7 @@ impl Ppu {
             mirror: Cell::new(mirror),
             grid_on: Cell::default(),
             debug_num: Cell::default(),
+            scroll_snapshot: Cell::default(),
         }
     }
 
