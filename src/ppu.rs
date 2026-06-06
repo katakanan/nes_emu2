@@ -25,14 +25,17 @@ pub struct Ppu {
     pub vram: Cell<[u8; 0x1000]>,
     pub oam: Cell<[u8; 0x0100]>,
     pub palette: Cell<[u8; 0x0020]>,
-    pub addr: Cell<u16>,
+    // Loopy registers (15-bit v/t, 3-bit x, 1-bit w)
+    // Layout: yyy NN YYYYY XXXXX
+    //         fineY NT coarseY coarseX
+    pub v: Cell<u16>,   // current VRAM address (also tile/scroll position)
+    pub t: Cell<u16>,   // temporary VRAM address ($2005/$2006/$2000 target)
+    pub x: Cell<u8>,    // fine X scroll (3 bits)
+    pub w: Cell<bool>,  // write toggle (shared by $2005 and $2006)
     pub ctrl: Cell<PpuCtrl>,
     pub mask: Cell<PpuMask>,
     pub status: Cell<PpuStatus>,
     pub oamaddr: Cell<u8>,
-    pub scroll: Cell<u16>,
-    pub scroll_snapshot: Cell<u16>, // scroll value latched at VBlank for each frame
-    pub latch: Cell<bool>,
     pub img: RefCell<image::ImageBuffer<image::Rgba<u8>, Vec<u8>>>,
     pub data_buf2006: Cell<u8>,
     // secondary_oam: Cell<[u8; 32]>, //4byte * 8 sprites
@@ -260,8 +263,10 @@ impl Ppu {
                                     nes.ppu.status.update(|status| {
                                         status & !(PpuStatus::VBLANK_STARTED | PpuStatus::ZERO_HIT)
                                     });
-                                    // Reset split flag for new frame, latch VBlank scroll
-                                    nes.ppu.scroll_snapshot.set(nes.ppu.scroll.get());
+                                }
+                                // Loopy: copy vertical bits of t→v at dots 280-304
+                                if (280..=304).contains(&x) {
+                                    nes.ppu.v_copy_vertical_from_t();
                                 }
                                 yield RenderStep::Cycle(frame, x, y);
                             }
@@ -361,7 +366,7 @@ impl Ppu {
     pub fn calc_bg_pixel_color_sel(nes: &Nes) -> usize {
         let hi_byte = nes.ppu.nt_shift_reg_hi.get();
         let lo_byte = nes.ppu.nt_shift_reg_lo.get();
-        let fine_x = (nes.ppu.scroll_snapshot.get() & 0x07) as u32;
+        let fine_x = nes.ppu.x.get() as u32;
         let mask = 0x8000_0000u32 >> fine_x;
         let hi_bit = (hi_byte & mask) != 0;
         let lo_bit = (lo_byte & mask) != 0;
@@ -378,7 +383,7 @@ impl Ppu {
     pub fn calc_bg_pixel_palette_sel(nes: &Nes) -> usize {
         let hi_byte = nes.ppu.at_shift_reg_hi.get();
         let lo_byte = nes.ppu.at_shift_reg_lo.get();
-        let fine_x = (nes.ppu.scroll_snapshot.get() & 0x07) as u32;
+        let fine_x = nes.ppu.x.get() as u32;
         let mask = 0x8000_0000u32 >> fine_x;
         let hi_bit = (hi_byte & mask) != 0;
         let lo_bit = (lo_byte & mask) != 0;
@@ -432,7 +437,7 @@ impl Ppu {
                                     let at_addr = Ppu::calc_ld_at_addr(nes, ld_x, ld_y);
                                     let bg_at_byte = nes.ppu.read8(at_addr);
                                     let (hi_bit, lo_bit) =
-                                        Ppu::calc_at_at_bit(ld_x, ld_y, bg_at_byte);
+                                        Ppu::calc_at_at_bit(nes, ld_x, ld_y, bg_at_byte);
                                     let shift_offset = if x < 249 { 0 } else { 5 };
                                     Ppu::update_at_shiftregs_w_offset(
                                         nes,
@@ -455,6 +460,18 @@ impl Ppu {
                                         bitmap_bytes.1,
                                         shift_offset,
                                     );
+                                    // Loopy: increment coarse_x after each tile fetch
+                                    if Ppu::is_rendering_enabled(nes) {
+                                        nes.ppu.v_coarse_x_increment();
+                                    }
+                                }
+                                // Loopy: dot 256 → Y increment
+                                if x == 256 && Ppu::is_rendering_enabled(nes) {
+                                    nes.ppu.v_y_increment();
+                                }
+                                // Loopy: dot 257 → copy horizontal bits t→v
+                                if x == 257 && Ppu::is_rendering_enabled(nes) {
+                                    nes.ppu.v_copy_horizontal_from_t();
                                 }
                                 yield RenderStep::Cycle(0, 0, 0);
                             }
@@ -468,6 +485,11 @@ impl Ppu {
                 }
             }
         }
+    }
+
+    pub fn is_rendering_enabled(nes: &Nes) -> bool {
+        let mask = nes.ppu.mask.get();
+        mask.contains(PpuMask::SHOW_BACKGROUND) || mask.contains(PpuMask::SHOW_SPRITES)
     }
 
     pub fn ppu_line_timing(ev_x: u32, ev_y: u32, offset: u32) -> bool {
@@ -487,30 +509,17 @@ impl Ppu {
         (ld_x, ld_y)
     }
 
-    pub fn calc_ld_at_addr(nes: &Nes, ld_x: u32, ld_y: u32) -> u16 {
-        let scroll = nes.ppu.scroll_snapshot.get();
-        let scroll_x = (scroll & 0x00FF) as u32;
-        let scroll_y = (scroll >> 8) as u32;
-
-        let x = ld_x + scroll_x;
-        let y = ld_y + scroll_y;
-
-        let at_x = (x >> 5) % 8;
-        let at_y = (y >> 5) % 8;
-        let at_addr_offset = at_x + at_y * 8;
-
-        let nt_h = (x >> 8) & 1;
-        let nt_v = (y >> 8) & 1;
-        let at_addr_base = 0x23C0u32 + nt_h * 0x0400 + nt_v * 0x0800;
-        (at_addr_base + at_addr_offset) as u16
+    pub fn calc_ld_at_addr(nes: &Nes, _ld_x: u32, _ld_y: u32) -> u16 {
+        // Loopy AT address: 0x23C0 | NT | ((coarseY >> 2) << 3) | (coarseX >> 2)
+        let v = nes.ppu.v.get();
+        0x23C0 | (v & 0x0C00) | ((v >> 4) & 0x38) | ((v >> 2) & 0x07)
     }
 
-    pub fn calc_at_at_bit(ld_x: u32, ld_y: u32, at_byte: u8) -> (u8, u8) {
-        let lsb = ((ld_x & (1 << 4)) != 0) as u8;
-        let msb = ((ld_y & (1 << 4)) != 0) as u8;
-
-        let shift = msb * 2 + lsb;
-        let at_2bits = (at_byte >> shift * 2) & 0b0000_0011;
+    pub fn calc_at_at_bit(nes: &Nes, _ld_x: u32, _ld_y: u32, at_byte: u8) -> (u8, u8) {
+        // Use v's coarseX/coarseY bit 1 to select 2-bit attribute quadrant
+        let v = nes.ppu.v.get();
+        let shift = ((v >> 4) & 4) | (v & 2); // ((coarseY & 2) << 1) | (coarseX & 2)
+        let at_2bits = (at_byte >> shift) & 0b11;
         let upper_bit = if (at_2bits & 0b10) != 0 { 0xFF } else { 0 };
         let lower_bit = if (at_2bits & 0b01) != 0 { 0xFF } else { 0 };
         (upper_bit, lower_bit)
@@ -537,29 +546,16 @@ impl Ppu {
         (ld_x, ld_y)
     }
 
-    pub fn calc_ld_nt_addr(nes: &Nes, ld_x: u32, ld_y: u32) -> u16 {
-        let scroll = nes.ppu.scroll_snapshot.get();
-        let scroll_x = (scroll & 0x00FF) as u32;
-        let scroll_y = (scroll >> 8) as u32;
-
-        // Apply scroll offsets; determine nametable from overflow
-        let x = ld_x + scroll_x;
-        let y = ld_y + scroll_y;
-
-        let nt_x = (x >> 3) % 32;
-        let nt_y = (y >> 3) % 32;
-        let nt_addr_offset = nt_x + nt_y * (VFRAME_W >> 3);
-
-        // Select nametable base based on scroll overflow
-        let nt_h = (x >> 8) & 1; // horizontal nametable select
-        let nt_v = (y >> 8) & 1; // vertical nametable select
-        let nt_addr_base = 0x2000u32 + nt_h * 0x0400 + nt_v * 0x0800;
-        (nt_addr_base + nt_addr_offset) as u16
+    pub fn calc_ld_nt_addr(nes: &Nes, _ld_x: u32, _ld_y: u32) -> u16 {
+        // Loopy NT address: 0x2000 | (v & 0x0FFF)
+        let v = nes.ppu.v.get();
+        0x2000 | (v & 0x0FFF)
     }
 
-    pub fn calc_nt_sprite_addr(nes: &Nes, _ld_x: u32, ld_y: u32, sprite_index: u8) -> u16 {
-        let scroll_y = (nes.ppu.scroll_snapshot.get() >> 8) as u32;
-        let nt_pattern_dy = ((ld_y + scroll_y) % 8) as u16;
+    pub fn calc_nt_sprite_addr(nes: &Nes, _ld_x: u32, _ld_y: u32, sprite_index: u8) -> u16 {
+        // BG pattern address uses fine Y from v
+        let v = nes.ppu.v.get();
+        let fine_y = (v >> 12) & 0x07;
         let nt_pattern_id = (sprite_index as u16) << 4;
         let nt_offset_addr = (nes
             .ppu
@@ -567,9 +563,7 @@ impl Ppu {
             .get()
             .contains(PpuCtrl::BACKGROUND_PATTERN_TABLE_ADDR) as u16)
             << 12;
-
-        let nt_sprite_addr = nt_offset_addr | nt_pattern_id | nt_pattern_dy;
-        nt_sprite_addr
+        nt_offset_addr | nt_pattern_id | fine_y
     }
 
     pub fn calc_nt_color_index(nes: &Nes, bg_sprite_line_addr: u16) -> (u8, u8) {
@@ -805,13 +799,14 @@ impl Ppu {
             vram: cell_zero(),
             oam: Cell::new([0xEF; 0x0100]),
             palette: cell_zero(),
-            addr: Cell::default(),
+            v: Cell::default(),
+            t: Cell::default(),
+            x: Cell::default(),
+            w: Cell::default(),
             ctrl: Cell::default(),
             mask: Cell::default(),
             status: Cell::default(),
             oamaddr: Cell::default(),
-            scroll: Cell::default(),
-            latch: Cell::default(),
             img: RefCell::new(img),
             data_buf2006: Cell::default(),
             secondary_oam: Cell::default(),
@@ -823,22 +818,22 @@ impl Ppu {
             mirror: Cell::new(mirror),
             grid_on: Cell::default(),
             debug_num: Cell::default(),
-            scroll_snapshot: Cell::default(),
         }
     }
 
     pub fn read_reg(&self, reg: u16) -> u8 {
         match reg {
             2 => {
+                // $2002 (PPUSTATUS): clears VBlank flag and resets w toggle
                 let ret = self.status.get().bits();
-                // Reading $2002 clears VBlank flag and resets address latch
                 self.status.update(|s| s & !PpuStatus::VBLANK_STARTED);
-                self.latch.set(false);
+                self.w.set(false);
                 ret
             }
             4 => 0xFF,
             7 => {
-                let addr = self.addr.get();
+                // $2007 (PPUDATA): read using v, then increment v
+                let addr = self.v.get();
                 let buffered_data = self.read8(addr);
 
                 let ret = if addr > 0x3F00 {
@@ -852,9 +847,7 @@ impl Ppu {
                     true => 32,
                     false => 1,
                 };
-
-                self.addr.set(addr.wrapping_add(step));
-
+                self.v.set(addr.wrapping_add(step));
                 ret
             }
             _ => {
@@ -866,13 +859,17 @@ impl Ppu {
     pub fn write_reg(&self, reg: u16, data: u8) {
         match reg {
             0 => {
+                // $2000 (PPUCTRL):
+                // t: ...GH.. ........ <- d: ......GH (nametable select)
                 self.ctrl.set(PpuCtrl::from_bits_truncate(data));
+                let t = self.t.get();
+                let nt = (data as u16 & 0x03) << 10;
+                self.t.set((t & !0x0C00) | nt);
             }
             1 => {
                 self.mask.set(PpuMask::from_bits_truncate(data));
             }
             2 => {
-                //Status is readonly
                 unreachable!("Status is Read Only");
             }
             3 => {
@@ -886,54 +883,112 @@ impl Ppu {
                 self.oamaddr.set(next_oamaddr);
             }
             5 => {
-                let latch = self.latch.get();
-                let newscroll = if latch {
-                    //to high
-                    let scroll_hi = (data as u16) << 8;
-                    let scroll_lo = self.scroll.get() & 0x00FF;
-                    scroll_hi | scroll_lo
+                // $2005 (PPUSCROLL): two writes
+                if !self.w.get() {
+                    // First write:
+                    // t: ....... ...ABCDE <- d: ABCDE...
+                    // x:              FGH <- d: .....FGH
+                    let t = self.t.get();
+                    let new_t = (t & !0x001F) | ((data as u16) >> 3);
+                    self.t.set(new_t);
+                    self.x.set(data & 0x07);
+                    self.w.set(true);
                 } else {
-                    //to low
-                    let scroll_lo = data as u16;
-                    let scroll_hi = self.scroll.get() & 0xFF00;
-                    scroll_hi | scroll_lo
-                };
-
-                self.scroll.set(newscroll);
-                self.latch.set(!latch);
+                    // Second write:
+                    // t: FGH..AB CDE..... <- d: ABCDEFGH
+                    let t = self.t.get();
+                    let new_t = (t & !0x73E0)
+                        | (((data as u16) & 0x07) << 12)   // fine Y → bits 14-12
+                        | (((data as u16) & 0xF8) << 2);   // coarse Y → bits 9-5
+                    self.t.set(new_t);
+                    self.w.set(false);
+                }
             }
             6 => {
-                let latch = self.latch.get();
-
-                let newaddr = if latch {
-                    //to low
-                    let addr_lo = data as u16;
-                    let addr_hi = self.addr.get() & 0xFF00;
-                    addr_hi | addr_lo
+                // $2006 (PPUADDR): two writes
+                if !self.w.get() {
+                    // First write:
+                    // t: .CDEFGH ........ <- d: ..CDEFGH
+                    // bit 14 of t cleared
+                    let t = self.t.get();
+                    let new_t = (t & 0x00FF) | ((data as u16 & 0x3F) << 8);
+                    self.t.set(new_t);
+                    self.w.set(true);
                 } else {
-                    //to high
-                    let addr_hi = (data as u16) << 8;
-                    let addr_lo = self.addr.get() & 0x00FF;
-                    addr_hi | addr_lo
-                };
-                self.addr.set(newaddr);
-                self.latch.set(!latch);
+                    // Second write:
+                    // t: ....... ABCDEFGH <- d: ABCDEFGH
+                    // v: <...all bits...> <- t
+                    let t = self.t.get();
+                    let new_t = (t & 0xFF00) | data as u16;
+                    self.t.set(new_t);
+                    self.v.set(new_t);
+                    self.w.set(false);
+                }
             }
             7 => {
-                let addr = self.addr.get();
-                let ctrl = self.ctrl.get();
-                let step = match ctrl.contains(PpuCtrl::VRAM_ADDR_INCREMENT) {
+                // $2007 (PPUDATA): write using v, then increment v
+                let addr = self.v.get();
+                let step = match self.ctrl.get().contains(PpuCtrl::VRAM_ADDR_INCREMENT) {
                     true => 32,
                     false => 1,
                 };
-
                 self.write8(addr, data);
-                self.addr.set(addr.wrapping_add(step));
+                self.v.set(addr.wrapping_add(step));
             }
             _ => {
                 unreachable!()
             }
         }
+    }
+
+    // Loopy v auto-increment helpers
+    pub fn v_coarse_x_increment(&self) {
+        // Called after each NT tile fetch
+        let mut v = self.v.get();
+        if (v & 0x001F) == 31 {
+            v &= !0x001F;
+            v ^= 0x0400; // switch horizontal nametable
+        } else {
+            v += 1;
+        }
+        self.v.set(v);
+    }
+
+    pub fn v_y_increment(&self) {
+        // Called at dot 256 of each rendering scanline
+        let mut v = self.v.get();
+        if (v & 0x7000) != 0x7000 {
+            v += 0x1000; // fine Y++
+        } else {
+            v &= !0x7000;
+            let mut coarse_y = (v >> 5) & 0x1F;
+            if coarse_y == 29 {
+                coarse_y = 0;
+                v ^= 0x0800; // switch vertical nametable
+            } else if coarse_y == 31 {
+                coarse_y = 0;
+            } else {
+                coarse_y += 1;
+            }
+            v = (v & !0x03E0) | (coarse_y << 5);
+        }
+        self.v.set(v);
+    }
+
+    pub fn v_copy_horizontal_from_t(&self) {
+        // Called at dot 257 of each rendering scanline
+        // Copy: coarse X (bits 4-0) and horizontal NT (bit 10)
+        let t = self.t.get();
+        let v = self.v.get();
+        self.v.set((v & !0x041F) | (t & 0x041F));
+    }
+
+    pub fn v_copy_vertical_from_t(&self) {
+        // Called at dots 280-304 of pre-render line
+        // Copy: fine Y (bits 14-12), vertical NT (bit 11), coarse Y (bits 9-5)
+        let t = self.t.get();
+        let v = self.v.get();
+        self.v.set((v & !0x7BE0) | (t & 0x7BE0));
     }
 
     pub fn read8(&self, addr: u16) -> u8 {
