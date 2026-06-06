@@ -137,7 +137,6 @@ pub struct SpriteInfo {
 pub struct SpriteOutputUnit {
     sprite_lsbits: u8,
     sprite_msbits: u8,
-    x: u8,
     sprite_info: SpriteInfo,
 }
 
@@ -170,22 +169,37 @@ impl Ppu {
                             for x in 0..FRAME_W as u32 {
                                 nes.ppu.dbg_dot.set(x);
                                 if x < VFRAME_W {
-                                    let bg_color_sel = Ppu::calc_bg_pixel_color_sel(nes);
+                                    let mask = nes.ppu.mask.get();
+                                    let show_bg_left =
+                                        mask.contains(PpuMask::SHOW_BACKGROUND_IN_LEFT_MARGIN);
+                                    let show_bg = mask.contains(PpuMask::SHOW_BACKGROUND);
+                                    let bg_color_sel = if !show_bg || (!show_bg_left && x < 8) {
+                                        0
+                                    } else {
+                                        Ppu::calc_bg_pixel_color_sel(nes)
+                                    };
                                     // let sp_color_sel = Ppu::calc_sp_pixel_color_sel(nes);
 
-                                    let bg_palette_sel = Ppu::calc_bg_pixel_palette_sel(nes);
+                                    let bg_palette_sel = if bg_color_sel == 0 {
+                                        0
+                                    } else {
+                                        Ppu::calc_bg_pixel_palette_sel(nes)
+                                    };
                                     // let (sp_palette_sel, sp_priority) =
                                     //     Ppu::calc_sp_pixel_palette_sel_and_priority(nes);
 
-                                    let (sp_color_sel, sp_palette_sel, sp_priority) = {
+                                    let (
+                                        sp_color_sel,
+                                        sp_palette_sel,
+                                        sp_priority,
+                                        is_sprite0_active,
+                                    ) = {
                                         let mask = nes.ppu.mask.get();
-                                        let show_sp_left = mask.contains(PpuMask::SHOW_SPRITES_IN_LEFT_MARGIN);
+                                        let show_sp_left =
+                                            mask.contains(PpuMask::SHOW_SPRITES_IN_LEFT_MARGIN);
                                         let show_sp = mask.contains(PpuMask::SHOW_SPRITES);
-                                        // Skip top 8 lines for sprites (CRT overscan compatibility)
-                                        // sprites evaluated on scanline N render on scanline N+1,
-                                        // so oam_y=0 sprites render on scanlines 1-8; hide all <= 8
-                                        if !show_sp || (!show_sp_left && x < 8) || y <= 8 {
-                                            (0, 0, false)
+                                        if !show_sp || (!show_sp_left && x < 8) {
+                                            (0, 0, false, false)
                                         } else {
                                             Ppu::calc_sp_pixel_color_sel_and_palette_sel_and_priority(nes)
                                         }
@@ -193,24 +207,14 @@ impl Ppu {
 
                                     // Sprite 0 hit detection
                                     let mask = nes.ppu.mask.get();
-                                    let bg_visible_for_hit = mask.contains(PpuMask::SHOW_BACKGROUND)
-                                        && (x >= 8
-                                            || mask.contains(
-                                                PpuMask::SHOW_BACKGROUND_IN_LEFT_MARGIN,
-                                            ));
-                                    let sp_visible_for_hit = mask.contains(PpuMask::SHOW_SPRITES)
+                                    let bg_visible_for_hit = mask
+                                        .contains(PpuMask::SHOW_BACKGROUND)
                                         && (x >= 8
                                             || mask
-                                                .contains(PpuMask::SHOW_SPRITES_IN_LEFT_MARGIN));
-                                    let sprite_output_units = nes.ppu.sprite_output_units.get();
-                                    let is_sprite0_active = sprite_output_units
-                                        .iter()
-                                        .any(|u| {
-                                            u.sprite_info.is_sprite0
-                                                && u.x == 0
-                                                && (u.sprite_lsbits & 0x80 != 0
-                                                    || u.sprite_msbits & 0x80 != 0)
-                                        });
+                                                .contains(PpuMask::SHOW_BACKGROUND_IN_LEFT_MARGIN));
+                                    let sp_visible_for_hit = mask.contains(PpuMask::SHOW_SPRITES)
+                                        && (x >= 8
+                                            || mask.contains(PpuMask::SHOW_SPRITES_IN_LEFT_MARGIN));
                                     if bg_visible_for_hit
                                         && sp_visible_for_hit
                                         && bg_color_sel != 0
@@ -230,7 +234,6 @@ impl Ppu {
                                         }
                                         nes.ppu.status.update(|s| s | PpuStatus::ZERO_HIT);
                                     }
-
                                     let (color_sel, palette_sel) =
                                         match (bg_color_sel, sp_color_sel) {
                                             _ if bg_color_sel == 0 && sp_color_sel == 0 => (0, 0),
@@ -316,7 +319,7 @@ impl Ppu {
                                     });
                                 }
                                 // Loopy: copy vertical bits of t→v at dots 280-304
-                                if (280..=304).contains(&x) {
+                                if (280..=304).contains(&x) && Ppu::is_rendering_enabled(nes) {
                                     nes.ppu.v_copy_vertical_from_t();
                                 }
                                 yield RenderStep::Cycle(frame, x, y);
@@ -341,10 +344,15 @@ impl Ppu {
         grid_on && (grid_x || grid_y)
     }
 
-    pub fn calc_sp_pixel_color_sel_and_palette_sel_and_priority(nes: &Nes) -> (usize, usize, bool) {
+    pub fn calc_sp_pixel_color_sel_and_palette_sel_and_priority(
+        nes: &Nes,
+    ) -> (usize, usize, bool, bool) {
         let calc_color_sel = |sprite_output_unit: SpriteOutputUnit| {
-            let lo_bit = (sprite_output_unit.sprite_lsbits & 0x80 != 0) as usize;
-            let hi_bit = (sprite_output_unit.sprite_msbits & 0x80 != 0) as usize;
+            let dot = nes.ppu.dbg_dot.get();
+            let x_offset = dot.wrapping_sub(sprite_output_unit.sprite_info.x as u32);
+            let bit = 7u32.wrapping_sub(x_offset);
+            let lo_bit = ((sprite_output_unit.sprite_lsbits >> bit) & 0x01) as usize;
+            let hi_bit = ((sprite_output_unit.sprite_msbits >> bit) & 0x01) as usize;
             let color_sel = hi_bit << 1 | lo_bit;
             color_sel
         };
@@ -357,62 +365,36 @@ impl Ppu {
 
         let sprite_output_units = nes.ppu.sprite_output_units.get();
         let res = sprite_output_units.into_iter().find(|&sprite_output_unit| {
-            (sprite_output_unit.x == 0) && (calc_color_sel(sprite_output_unit) != 0)
+            let dot = nes.ppu.dbg_dot.get();
+            let x_offset = dot.wrapping_sub(sprite_output_unit.sprite_info.x as u32);
+            x_offset < 8 && calc_color_sel(sprite_output_unit) != 0
         });
 
         let ret = match res {
             Some(sprite_output_unit) => {
                 let color_sel = calc_color_sel(sprite_output_unit);
                 let (palette, priority) = calc_palette_and_priority(sprite_output_unit);
-                (color_sel, palette, priority)
+                (
+                    color_sel,
+                    palette,
+                    priority,
+                    sprite_output_unit.sprite_info.is_sprite0,
+                )
             }
-            None => (0, 0, false),
+            None => (0, 0, false, false),
         };
 
         ret
     }
 
     pub fn calc_sp_pixel_color_sel(nes: &Nes) -> usize {
-        //if x == 0
-        //then return color code
-        let sprite_output_units = nes.ppu.sprite_output_units.get();
-        let res = sprite_output_units
-            .into_iter()
-            .find(|&sprite_output_unit| sprite_output_unit.x == 0);
-        let color_sel = match res {
-            Some(sprite_output_unit) => {
-                let lo_bit = sprite_output_unit.sprite_lsbits & 0x80 != 0;
-                let hi_bit = sprite_output_unit.sprite_msbits & 0x80 != 0;
-
-                let sel = match (hi_bit, lo_bit) {
-                    (false, false) => 0,
-                    (false, true) => 1,
-                    (true, false) => 2,
-                    (true, true) => 3,
-                };
-
-                sel
-            }
-            _ => 0,
-        };
-
-        color_sel
+        Ppu::calc_sp_pixel_color_sel_and_palette_sel_and_priority(nes).0
     }
 
     pub fn calc_sp_pixel_palette_sel_and_priority(nes: &Nes) -> (usize, bool) {
-        let sprite_output_units = nes.ppu.sprite_output_units.get();
-        let res = sprite_output_units
-            .into_iter()
-            .find(|&sprite_output_unit| sprite_output_unit.x == 0);
-        let sel_and_priority = match res {
-            Some(sprite_output_unit) => {
-                let sel = ((sprite_output_unit.sprite_info.attr & 0x03) + 0x04) as usize;
-                let priority = sprite_output_unit.sprite_info.attr & 0x20 == 0;
-                (sel, priority)
-            }
-            _ => (0, false),
-        };
-        sel_and_priority
+        let (_, palette_sel, priority, _) =
+            Ppu::calc_sp_pixel_color_sel_and_palette_sel_and_priority(nes);
+        (palette_sel, priority)
     }
 
     pub fn calc_bg_pixel_color_sel(nes: &Nes) -> usize {
@@ -654,6 +636,7 @@ impl Ppu {
                                 // nes.ppu.secondary_oam.set([0xFF; 32]);
                                 oam_scan_index = 0;
                                 oam_buf = [SpriteInfo::default(); 8];
+                                sprite_output_units_buf = [SpriteOutputUnit::default(); 8];
                                 oam_buf_index = 0;
                             } else if Ppu::sprite_evaluate_timing(x, 0) {
                                 let sprite_y_m_1 = oam[oam_scan_index * 4].get() as u32;
@@ -689,12 +672,17 @@ impl Ppu {
                                 let index = (x as usize - 257) / 8;
 
                                 let sprite_info = nes.ppu.secondary_oam()[index].get();
+                                if sprite_info.y == 0xFF {
+                                    sprite_output_units_buf[index] = SpriteOutputUnit::default();
+                                    nes.ppu.sprite_output_units.set(sprite_output_units_buf);
+                                    yield RenderStep::Cycle(0, 0, 0);
+                                    continue;
+                                }
                                 let sprite_pattern_addr_lo =
                                     Ppu::sprite_loading_addr(nes, y, &sprite_info);
                                 let sprite_lsbits = nes.ppu.read8(sprite_pattern_addr_lo);
                                 let sprite_msbits =
                                     nes.ppu.read8(sprite_pattern_addr_lo.wrapping_add(8));
-                                let x = sprite_info.x;
                                 let (sprite_lsbits, sprite_msbits) = Ppu::sprite_flipbyte(
                                     &sprite_info,
                                     sprite_lsbits,
@@ -704,7 +692,6 @@ impl Ppu {
                                 let sprite_output = SpriteOutputUnit {
                                     sprite_lsbits,
                                     sprite_msbits,
-                                    x,
                                     sprite_info,
                                 };
 
@@ -773,19 +760,8 @@ impl Ppu {
     pub fn sprite_output_units_update<'a>(
         nes: &'a Nes,
     ) -> impl Coroutine<Yield = RenderStep, Return = !> + 'a {
+        let _ = nes;
         #[coroutine] move || loop {
-            let mut sprite_output_units = nes.ppu.sprite_output_units.get();
-
-            for unit in sprite_output_units.iter_mut() {
-                if unit.x > 0 {
-                    unit.x = unit.x - 1;
-                } else {
-                    unit.sprite_lsbits = unit.sprite_lsbits << 1;
-                    unit.sprite_msbits = unit.sprite_msbits << 1;
-                }
-            }
-
-            nes.ppu.sprite_output_units.set(sprite_output_units);
             yield RenderStep::Cycle(0, 0, 0);
         }
     }
