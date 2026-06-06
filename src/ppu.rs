@@ -34,6 +34,7 @@ pub struct Ppu {
     pub x_scanline: Cell<u8>, // fine X latched at start of each scanline
     pub w: Cell<bool>,  // write toggle (shared by $2005 and $2006)
     pub warmup: Cell<bool>,  // true until first VBlank; blocks $2000/$2005/$2006 writes
+    pub vblank_suppress: Cell<bool>,  // set if $2002 read in race window; suppresses next VBlank set + NMI
     pub dbg_scanline: Cell<u32>, // current scanline (for debug)
     pub dbg_dot: Cell<u32>, // current dot (for debug)
     pub ctrl: Cell<PpuCtrl>,
@@ -821,6 +822,7 @@ impl Ppu {
             x_scanline: Cell::default(),
             w: Cell::default(),
             warmup: Cell::new(true),  // Block writes until first VBlank
+            vblank_suppress: Cell::new(false),
             dbg_scanline: Cell::default(),
             dbg_dot: Cell::default(),
             ctrl: Cell::default(),
@@ -848,6 +850,9 @@ impl Ppu {
                 let ret = self.status.get().bits();
                 self.status.update(|s| s & !PpuStatus::VBLANK_STARTED);
                 self.w.set(false);
+
+                // Race condition: disabled for now (causes flicker without
+                // tighter cycle-accurate sync). See CYCLE_ACCURACY_TODO.md
                 ret
             }
             4 => 0xFF,
