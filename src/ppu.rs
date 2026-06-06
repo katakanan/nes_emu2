@@ -32,6 +32,8 @@ pub struct Ppu {
     pub t: Cell<u16>,   // temporary VRAM address ($2005/$2006/$2000 target)
     pub x: Cell<u8>,    // fine X scroll (3 bits)
     pub w: Cell<bool>,  // write toggle (shared by $2005 and $2006)
+    pub dbg_scanline: Cell<u32>, // current scanline (for debug)
+    pub dbg_dot: Cell<u32>, // current dot (for debug)
     pub ctrl: Cell<PpuCtrl>,
     pub mask: Cell<PpuMask>,
     pub status: Cell<PpuStatus>,
@@ -152,12 +154,14 @@ impl Ppu {
             for frame in 0.. {
                 for scanline in 0..FRAME_H {
                     let y = scanline as u32;
+                    nes.ppu.dbg_scanline.set(y);
 
                     match y {
                         0..=VFRAME_END => {
                             //0 - 239
                             //Visible Frame
                             for x in 0..FRAME_W as u32 {
+                                nes.ppu.dbg_dot.set(x);
                                 if x < VFRAME_W {
                                     let bg_color_sel = Ppu::calc_bg_pixel_color_sel(nes);
                                     // let sp_color_sel = Ppu::calc_sp_pixel_color_sel(nes);
@@ -233,11 +237,13 @@ impl Ppu {
                             //240
                             //nothing
                             for x in 0..FRAME_W as u32 {
+                                nes.ppu.dbg_dot.set(x);
                                 yield RenderStep::Cycle(frame, x, y);
                             }
                         }
                         SET_VBLANK_LINE => {
                             for x in 0..FRAME_W as u32 {
+                                nes.ppu.dbg_dot.set(x);
                                 if x == 1 {
                                     nes.ppu
                                         .status
@@ -259,6 +265,7 @@ impl Ppu {
                         PRE_RENDER_LINE => {
                             //261
                             for x in 0..FRAME_W as u32 {
+                                nes.ppu.dbg_dot.set(x);
                                 if x == 1 {
                                     nes.ppu.status.update(|status| {
                                         status & !(PpuStatus::VBLANK_STARTED | PpuStatus::ZERO_HIT)
@@ -273,6 +280,7 @@ impl Ppu {
                         }
                         _ => {
                             for x in 0..FRAME_W as u32 {
+                                nes.ppu.dbg_dot.set(x);
                                 yield RenderStep::Cycle(frame, x, y);
                             }
                         }
@@ -803,6 +811,8 @@ impl Ppu {
             t: Cell::default(),
             x: Cell::default(),
             w: Cell::default(),
+            dbg_scanline: Cell::default(),
+            dbg_dot: Cell::default(),
             ctrl: Cell::default(),
             mask: Cell::default(),
             status: Cell::default(),
