@@ -35,6 +35,8 @@ pub struct Ppu {
     pub w: Cell<bool>,  // write toggle (shared by $2005 and $2006)
     pub warmup: Cell<bool>,  // true until first VBlank; blocks $2000/$2005/$2006 writes
     pub vblank_suppress: Cell<bool>,  // set if $2002 read in race window; suppresses next VBlank set + NMI
+    pub nmi_delay: Cell<u8>,
+    pub dbg_cpu_cycle: Cell<u64>, // current CPU cycle (for debug)
     pub dbg_scanline: Cell<u32>, // current scanline (for debug)
     pub dbg_dot: Cell<u32>, // current dot (for debug)
     pub ctrl: Cell<PpuCtrl>,
@@ -220,7 +222,8 @@ impl Ppu {
                                             && std::env::var_os("NES_TRACE_PPU").is_some()
                                         {
                                             eprintln!(
-                                                "ZERO_HIT sl={} dot={}",
+                                                "ZERO_HIT cpu={} sl={} dot={}",
+                                                nes.cpu.cycles.get(),
                                                 nes.ppu.dbg_scanline.get(),
                                                 nes.ppu.dbg_dot.get()
                                             );
@@ -279,12 +282,16 @@ impl Ppu {
                             for x in 0..FRAME_W as u32 {
                                 nes.ppu.dbg_dot.set(x);
                                 if x == 1 {
-                                    nes.ppu
-                                        .status
-                                        .update(|status| status | PpuStatus::VBLANK_STARTED);
+                                    if nes.ppu.vblank_suppress.get() {
+                                        nes.ppu.vblank_suppress.set(false);
+                                    } else {
+                                        nes.ppu
+                                            .status
+                                            .update(|status| status | PpuStatus::VBLANK_STARTED);
 
-                                    if nes.ppu.ctrl.get().contains(PpuCtrl::VBLANK_INTERRUPT) {
-                                        nes.cpu.nmi.set(true);
+                                        if nes.ppu.ctrl.get().contains(PpuCtrl::VBLANK_INTERRUPT) {
+                                            nes.ppu.nmi_delay.set(2);
+                                        }
                                     }
                                     // End warmup at first VBlank — register writes
                                     // ($2000/$2005/$2006) take effect from now on.
@@ -842,6 +849,13 @@ impl Ppu {
                 }
             }
 
+            if nes.ppu.nmi_delay.get() > 0 {
+                nes.ppu.nmi_delay.update(|delay| delay - 1);
+                if nes.ppu.nmi_delay.get() == 0 {
+                    nes.cpu.nmi.set(true);
+                }
+            }
+
             yield PpuStep::Cycle(renderstep, 0);
         }
     }
@@ -861,6 +875,8 @@ impl Ppu {
             w: Cell::default(),
             warmup: Cell::new(true),  // Block writes until first VBlank
             vblank_suppress: Cell::new(false),
+            nmi_delay: Cell::default(),
+            dbg_cpu_cycle: Cell::default(),
             dbg_scanline: Cell::default(),
             dbg_dot: Cell::default(),
             ctrl: Cell::default(),
@@ -885,12 +901,17 @@ impl Ppu {
         match reg {
             2 => {
                 // $2002 (PPUSTATUS): clears VBlank flag and resets w toggle
-                let ret = self.status.get().bits();
+                let in_vblank_race = std::env::var_os("NES_ENABLE_PPU_RACE").is_some()
+                    && self.dbg_scanline.get() == SET_VBLANK_LINE
+                    && self.dbg_dot.get() == 0;
+                let ret = if in_vblank_race {
+                    self.vblank_suppress.set(true);
+                    (self.status.get() & !PpuStatus::VBLANK_STARTED).bits()
+                } else {
+                    self.status.get().bits()
+                };
                 self.status.update(|s| s & !PpuStatus::VBLANK_STARTED);
                 self.w.set(false);
-
-                // Race condition: disabled for now (causes flicker without
-                // tighter cycle-accurate sync). See CYCLE_ACCURACY_TODO.md
                 ret
             }
             4 => 0xFF,
@@ -906,11 +927,7 @@ impl Ppu {
                 };
 
                 self.data_buf2006.set(buffered_data);
-                let step = match self.ctrl.get().contains(PpuCtrl::VRAM_ADDR_INCREMENT) {
-                    true => 32,
-                    false => 1,
-                };
-                self.v.set(addr.wrapping_add(step));
+                self.increment_v_after_2007_access();
                 ret
             }
             _ => {
@@ -926,7 +943,14 @@ impl Ppu {
                 if self.warmup.get() {
                     return;
                 }
+                let old_ctrl = self.ctrl.get();
                 self.ctrl.set(PpuCtrl::from_bits_truncate(data));
+                if !old_ctrl.contains(PpuCtrl::VBLANK_INTERRUPT)
+                    && self.ctrl.get().contains(PpuCtrl::VBLANK_INTERRUPT)
+                    && self.status.get().contains(PpuStatus::VBLANK_STARTED)
+                {
+                    self.nmi_delay.set(2);
+                }
                 let t = self.t.get();
                 let nt = (data as u16 & 0x03) << 10;
                 self.t.set((t & !0x0C00) | nt);
@@ -934,8 +958,9 @@ impl Ppu {
             1 => {
                 if std::env::var_os("NES_TRACE_PPU").is_some() {
                     eprintln!(
-                        "PPUMASK write ${:02X} sl={} dot={}",
+                        "PPUMASK write ${:02X} cpu={} sl={} dot={}",
                         data,
+                        self.dbg_cpu_cycle.get(),
                         self.dbg_scanline.get(),
                         self.dbg_dot.get()
                     );
@@ -1008,11 +1033,7 @@ impl Ppu {
                 // $2007 (PPUDATA): write using v, then increment v
                 let addr = self.v.get();
                 self.write8(addr, data);
-                let step = match self.ctrl.get().contains(PpuCtrl::VRAM_ADDR_INCREMENT) {
-                    true => 32,
-                    false => 1,
-                };
-                self.v.set(addr.wrapping_add(step));
+                self.increment_v_after_2007_access();
             }
             _ => {
                 unreachable!()
@@ -1068,6 +1089,24 @@ impl Ppu {
         let t = self.t.get();
         let v = self.v.get();
         self.v.set((v & !0x7BE0) | (t & 0x7BE0));
+    }
+
+    pub fn increment_v_after_2007_access(&self) {
+        let rendering_enabled = {
+            let mask = self.mask.get();
+            mask.contains(PpuMask::SHOW_BACKGROUND) || mask.contains(PpuMask::SHOW_SPRITES)
+        };
+
+        if rendering_enabled {
+            self.v_coarse_x_increment();
+            self.v_y_increment();
+        } else {
+            let step = match self.ctrl.get().contains(PpuCtrl::VRAM_ADDR_INCREMENT) {
+                true => 32,
+                false => 1,
+            };
+            self.v.set(self.v.get().wrapping_add(step));
+        }
     }
 
     pub fn read8(&self, addr: u16) -> u8 {

@@ -22,6 +22,7 @@ pub struct Cpu {
     pub p: Cell<Status>,
     pub nmi: Cell<bool>,
     pub dma_stall: Cell<u32>,  // OAMDMA stall cycles remaining
+    pub cycles: Cell<u64>,
 }
 
 #[derive(Debug, Clone)]
@@ -866,6 +867,15 @@ impl Cpu {
                     yield_all! { Mem_IndY_calc(nes, RRA) }
                 }
             };
+
+            if std::env::var_os("NES_TRACE_CPU").is_some() && (0x8000..=0x8080).contains(&pc) {
+                eprintln!(
+                    "CPU cpu={} pc={:04X} op={:?}",
+                    nes.cpu.cycles.get(),
+                    pc,
+                    opcode
+                );
+            }
 
             yield CpuStep::Op(pc, opcode, oparg);
         }

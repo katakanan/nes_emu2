@@ -40,6 +40,8 @@ impl Nes {
             loop {
                 match Pin::new(&mut nes_cpu).resume(()) {
                     CoroutineState::Yielded(cpu_step @ CpuStep::Cycle) => {
+                        self.cpu.cycles.update(|c| c + 1);
+                        self.ppu.dbg_cpu_cycle.set(self.cpu.cycles.get());
                         if cfg!(feature = "nestest") {
                             cpu_cycle = cpu_cycle + 1;
                         }
@@ -215,8 +217,9 @@ impl Nes {
             }
             0x4014 => {
                 self.copy_oam_data(data);
-                // OAMDMA stalls CPU for 513 cycles per real NES spec
-                self.cpu.dma_stall.set(513);
+                // OAMDMA stalls for 513 or 514 cycles depending on CPU get/put alignment.
+                let stall_cycles = if self.cpu.cycles.get() & 1 == 0 { 513 } else { 514 };
+                self.cpu.dma_stall.set(stall_cycles);
             }
             0x4016 => {
                 let strobe = (data & 0x01) != 0;
