@@ -198,7 +198,9 @@ impl Ppu {
                                         let show_sp_left =
                                             mask.contains(PpuMask::SHOW_SPRITES_IN_LEFT_MARGIN);
                                         let show_sp = mask.contains(PpuMask::SHOW_SPRITES);
-                                        if !show_sp || (!show_sp_left && x < 8) {
+                                        // CRT overscan: hide sprites in top 8 scanlines
+                                        // (sprites with OAM_Y=0 render at sl=1-8 which TVs hide)
+                                        if !show_sp || (!show_sp_left && x < 8) || y <= 8 {
                                             (0, 0, false, false)
                                         } else {
                                             Ppu::calc_sp_pixel_color_sel_and_palette_sel_and_priority(nes)
