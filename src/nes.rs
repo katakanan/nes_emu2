@@ -201,7 +201,7 @@ impl Nes {
             }
             0x0800..=0x1FFF => {
                 //mirror to WRAM
-                let offset = (addr - 0x0800) % (0x7FF);
+                let offset = (addr - 0x0800) % 0x800;
                 self.ram()[offset as usize].set(data);
             }
             0x2000..=0x2007 => {

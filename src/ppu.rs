@@ -128,6 +128,7 @@ pub struct SpriteInfo {
     id: u8,
     attr: u8,
     x: u8,
+    is_sprite0: bool,
 }
 
 #[derive(Debug, Clone, Default, Copy)]
@@ -145,6 +146,7 @@ impl Default for SpriteInfo {
             id: 0xFF,
             attr: 0xFF,
             x: 0xFF,
+            is_sprite0: false,
         }
     }
 }
@@ -188,12 +190,41 @@ impl Ppu {
                                     };
 
                                     // Sprite 0 hit detection
+                                    let mask = nes.ppu.mask.get();
+                                    let bg_visible_for_hit = mask.contains(PpuMask::SHOW_BACKGROUND)
+                                        && (x >= 8
+                                            || mask.contains(
+                                                PpuMask::SHOW_BACKGROUND_IN_LEFT_MARGIN,
+                                            ));
+                                    let sp_visible_for_hit = mask.contains(PpuMask::SHOW_SPRITES)
+                                        && (x >= 8
+                                            || mask
+                                                .contains(PpuMask::SHOW_SPRITES_IN_LEFT_MARGIN));
                                     let sprite_output_units = nes.ppu.sprite_output_units.get();
                                     let is_sprite0_active = sprite_output_units
-                                        .first()
-                                        .map(|u| u.x == 0 && (u.sprite_lsbits & 0x80 != 0 || u.sprite_msbits & 0x80 != 0))
-                                        .unwrap_or(false);
-                                    if bg_color_sel != 0 && sp_color_sel != 0 && is_sprite0_active && x < 255 {
+                                        .iter()
+                                        .any(|u| {
+                                            u.sprite_info.is_sprite0
+                                                && u.x == 0
+                                                && (u.sprite_lsbits & 0x80 != 0
+                                                    || u.sprite_msbits & 0x80 != 0)
+                                        });
+                                    if bg_visible_for_hit
+                                        && sp_visible_for_hit
+                                        && bg_color_sel != 0
+                                        && sp_color_sel != 0
+                                        && is_sprite0_active
+                                        && x < 255
+                                    {
+                                        if !nes.ppu.status.get().contains(PpuStatus::ZERO_HIT)
+                                            && std::env::var_os("NES_TRACE_PPU").is_some()
+                                        {
+                                            eprintln!(
+                                                "ZERO_HIT sl={} dot={}",
+                                                nes.ppu.dbg_scanline.get(),
+                                                nes.ppu.dbg_dot.get()
+                                            );
+                                        }
                                         nes.ppu.status.update(|s| s | PpuStatus::ZERO_HIT);
                                     }
 
@@ -368,7 +399,7 @@ impl Ppu {
             .find(|&sprite_output_unit| sprite_output_unit.x == 0);
         let sel_and_priority = match res {
             Some(sprite_output_unit) => {
-                let sel = (sprite_output_unit.sprite_info.attr & 0x03 + 0x04) as usize;
+                let sel = ((sprite_output_unit.sprite_info.attr & 0x03) + 0x04) as usize;
                 let priority = sprite_output_unit.sprite_info.attr & 0x20 == 0;
                 (sel, priority)
             }
@@ -626,8 +657,15 @@ impl Ppu {
                                         let id = oam[oam_scan_index * 4 + 1].get();
                                         let attr = oam[oam_scan_index * 4 + 2].get();
                                         let x = oam[oam_scan_index * 4 + 3].get();
+                                        let is_sprite0 = oam_scan_index == 0;
 
-                                        let sprite_info = SpriteInfo { y, id, attr, x };
+                                        let sprite_info = SpriteInfo {
+                                            y,
+                                            id,
+                                            attr,
+                                            x,
+                                            is_sprite0,
+                                        };
                                         oam_buf[oam_buf_index] = sprite_info;
                                         oam_buf_index = oam_buf_index + 1;
                                     } else {
@@ -894,6 +932,14 @@ impl Ppu {
                 self.t.set((t & !0x0C00) | nt);
             }
             1 => {
+                if std::env::var_os("NES_TRACE_PPU").is_some() {
+                    eprintln!(
+                        "PPUMASK write ${:02X} sl={} dot={}",
+                        data,
+                        self.dbg_scanline.get(),
+                        self.dbg_dot.get()
+                    );
+                }
                 self.mask.set(PpuMask::from_bits_truncate(data));
             }
             2 => {
@@ -1073,13 +1119,17 @@ impl Ppu {
             0x3F00..=0x3F1F => {
                 //BG palette : =0x3F0F
                 //SP palette : =0x3F1F
+                let addr = match addr {
+                    0x3F10 | 0x3F14 | 0x3F18 | 0x3F1C => addr - 0x0010,
+                    _ => addr,
+                };
                 let offset = addr - 0x3F00;
                 self.palette()[offset as usize].get()
             }
             0x3F20..=0x3FFF => {
                 //mirror to 0x3F00..=0x3F1F
-                let offset = (addr - 0x3F20) % 0x20;
-                self.palette()[offset as usize].get()
+                let addr = 0x3F00 + ((addr - 0x3F00) % 0x20);
+                self.read8(addr)
             }
             _ => {
                 // panic!("Out of VMemory 0x{:04X}", addr);
@@ -1134,7 +1184,7 @@ impl Ppu {
                 //BG palette : =0x3F0F
                 //SP palette : =0x3F1F
                 let addr = match addr {
-                    0x3F10 | 0x3F14 | 0x3F19 | 0x3F1C => addr - 0x0010,
+                    0x3F10 | 0x3F14 | 0x3F18 | 0x3F1C => addr - 0x0010,
                     _ => addr,
                 };
 
@@ -1143,8 +1193,8 @@ impl Ppu {
             }
             0x3F20..=0x3FFF => {
                 //mirror to 0x3F00..=0x3F1F
-                let offset = (addr - 0x3F20) & 0x20;
-                self.palette()[offset as usize].set(data);
+                let addr = 0x3F00 + ((addr - 0x3F00) % 0x20);
+                self.write8(addr, data);
             }
             0x4000..=0xFFFF => {
                 // panic!("Out of VMemory 0x{:04X}", addr);
