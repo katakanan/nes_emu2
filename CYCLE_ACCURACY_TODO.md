@@ -51,3 +51,21 @@ This causes ground to appear ~16 scanlines earlier than expected.
 - 8x16 sprite mode (not implemented)
 - Color emphasis bits (not implemented)
 - Grayscale bit (not implemented)
+
+## Attempted Fixes (cycle-accuracy branch)
+
+### $2002 race condition
+- Implemented vblank_suppress flag
+- Disabled by default: narrow detection window causes flicker without
+  tighter PPU/CPU cycle sync (CPU sees PPU state ~3 cycles behind real)
+
+### NMI assertion delay
+- Tried 2 PPU cycle delay
+- No effect on giko015 Y offset
+
+## Conclusion
+
+The 1819-cycle drift per frame for giko015 cannot be easily fixed
+without implementing cycle-perfect PPU/CPU interleaved sync, which
+is a major architectural rework. Current implementation accepts
+this limitation.
