@@ -162,10 +162,19 @@ impl Ppu {
                                     // let (sp_palette_sel, sp_priority) =
                                     //     Ppu::calc_sp_pixel_palette_sel_and_priority(nes);
 
-                                    let (sp_color_sel, sp_palette_sel, sp_priority) =
-                                        Ppu::calc_sp_pixel_color_sel_and_palette_sel_and_priority(
-                                            nes,
-                                        );
+                                    let (sp_color_sel, sp_palette_sel, sp_priority) = {
+                                        let mask = nes.ppu.mask.get();
+                                        let show_sp_left = mask.contains(PpuMask::SHOW_SPRITES_IN_LEFT_MARGIN);
+                                        let show_sp = mask.contains(PpuMask::SHOW_SPRITES);
+                                        // Skip top 8 lines for sprites (CRT overscan compatibility)
+                                        // sprites evaluated on scanline N render on scanline N+1,
+                                        // so oam_y=0 sprites render on scanlines 1-8; hide all <= 8
+                                        if !show_sp || (!show_sp_left && x < 8) || y <= 8 {
+                                            (0, 0, false)
+                                        } else {
+                                            Ppu::calc_sp_pixel_color_sel_and_palette_sel_and_priority(nes)
+                                        }
+                                    };
 
                                     // Sprite 0 hit detection
                                     let sprite_output_units = nes.ppu.sprite_output_units.get();
@@ -578,7 +587,6 @@ impl Ppu {
                                         let id = oam[oam_scan_index * 4 + 1].get();
                                         let attr = oam[oam_scan_index * 4 + 2].get();
                                         let x = oam[oam_scan_index * 4 + 3].get();
-                                        // println!("{}", id); //162
 
                                         let sprite_info = SpriteInfo { y, id, attr, x };
                                         oam_buf[oam_buf_index] = sprite_info;
