@@ -1086,6 +1086,7 @@ impl Ppu {
     }
 
     pub fn read8(&self, addr: u16) -> u8 {
+        let addr = addr % 0x4000;
         match addr {
             0x0000..=0x1FFF => {
                 //pattern table 0 and 1
@@ -1093,7 +1094,7 @@ impl Ppu {
                 self.chrrom[addr as usize]
             }
             0x2000..=0x3EFF => {
-                let addr = addr - 0x2000;
+                let addr = (addr - 0x2000) % 0x1000;
                 //0x0000 ~ 0x1EFF
                 let data = match self.mirror.get() {
                     MIRROR::VERTICAL => match addr {
@@ -1154,14 +1155,14 @@ impl Ppu {
     }
 
     pub fn write8(&self, addr: u16, data: u8) {
+        let addr = addr % 0x4000;
         match addr {
             0x0000..=0x1FFF => {
-                //pattern table 0 and 1
-                //maybe readonly
-                unreachable!("Chrrom is Read Only @0x{:04X}  0x{:04X}", addr, data);
+                // CHR ROM cartridges ignore pattern-table writes.
+                let _ = data;
             }
             0x2000..=0x3EFF => {
-                let addr = addr - 0x2000;
+                let addr = (addr - 0x2000) % 0x1000;
                 //0x0000 ~ 0x1EFF
                 match self.mirror.get() {
                     MIRROR::VERTICAL => match addr {
