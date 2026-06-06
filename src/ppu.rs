@@ -956,11 +956,11 @@ impl Ppu {
             7 => {
                 // $2007 (PPUDATA): write using v, then increment v
                 let addr = self.v.get();
+                self.write8(addr, data);
                 let step = match self.ctrl.get().contains(PpuCtrl::VRAM_ADDR_INCREMENT) {
                     true => 32,
                     false => 1,
                 };
-                self.write8(addr, data);
                 self.v.set(addr.wrapping_add(step));
             }
             _ => {
