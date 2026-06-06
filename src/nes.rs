@@ -215,6 +215,9 @@ impl Nes {
             }
             0x4014 => {
                 self.copy_oam_data(data);
+                // OAMDMA stalls CPU for 513 cycles (514 if started on odd CPU cycle).
+                // Use 513 as a baseline; this is critical for game timing.
+                self.cpu.dma_stall.set(513);
             }
             0x4016 => {
                 let strobe = (data & 0x01) != 0;

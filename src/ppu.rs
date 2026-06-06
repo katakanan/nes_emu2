@@ -31,7 +31,9 @@ pub struct Ppu {
     pub v: Cell<u16>,   // current VRAM address (also tile/scroll position)
     pub t: Cell<u16>,   // temporary VRAM address ($2005/$2006/$2000 target)
     pub x: Cell<u8>,    // fine X scroll (3 bits)
+    pub x_scanline: Cell<u8>, // fine X latched at start of each scanline
     pub w: Cell<bool>,  // write toggle (shared by $2005 and $2006)
+    pub warmup: Cell<bool>,  // true until first VBlank; blocks $2000/$2005/$2006 writes
     pub dbg_scanline: Cell<u32>, // current scanline (for debug)
     pub dbg_dot: Cell<u32>, // current dot (for debug)
     pub ctrl: Cell<PpuCtrl>,
@@ -252,6 +254,9 @@ impl Ppu {
                                     if nes.ppu.ctrl.get().contains(PpuCtrl::VBLANK_INTERRUPT) {
                                         nes.cpu.nmi.set(true);
                                     }
+                                    // End warmup at first VBlank — register writes
+                                    // ($2000/$2005/$2006) take effect from now on.
+                                    nes.ppu.warmup.set(false);
 
                                     *nes.ppu.img.borrow_mut() = buf.clone();
                                     yield RenderStep::Vblank;
@@ -374,7 +379,7 @@ impl Ppu {
     pub fn calc_bg_pixel_color_sel(nes: &Nes) -> usize {
         let hi_byte = nes.ppu.nt_shift_reg_hi.get();
         let lo_byte = nes.ppu.nt_shift_reg_lo.get();
-        let fine_x = nes.ppu.x.get() as u32;
+        let fine_x = nes.ppu.x_scanline.get() as u32;
         let mask = 0x8000_0000u32 >> fine_x;
         let hi_bit = (hi_byte & mask) != 0;
         let lo_bit = (lo_byte & mask) != 0;
@@ -391,7 +396,7 @@ impl Ppu {
     pub fn calc_bg_pixel_palette_sel(nes: &Nes) -> usize {
         let hi_byte = nes.ppu.at_shift_reg_hi.get();
         let lo_byte = nes.ppu.at_shift_reg_lo.get();
-        let fine_x = nes.ppu.x.get() as u32;
+        let fine_x = nes.ppu.x_scanline.get() as u32;
         let mask = 0x8000_0000u32 >> fine_x;
         let hi_bit = (hi_byte & mask) != 0;
         let lo_bit = (lo_byte & mask) != 0;
@@ -427,6 +432,11 @@ impl Ppu {
                     let y = scanline as u32;
                     match y {
                         PRE_RENDER_LINE | 0..=VFRAME_END => {
+                            // Latch fine X only at pre-render line (frame start),
+                            // so mid-frame $2005 writes don't affect current frame.
+                            if y == PRE_RENDER_LINE {
+                                nes.ppu.x_scanline.set(nes.ppu.x.get());
+                            }
                             for x in 0..FRAME_W as u32 {
                                 if Ppu::ppu_line_timing(x, y, 1) {
                                     let (ld_x, ld_y) = Ppu::calc_ld_nt_coord(x, y);
@@ -503,9 +513,7 @@ impl Ppu {
     pub fn ppu_line_timing(ev_x: u32, ev_y: u32, offset: u32) -> bool {
         let a = ev_x % 8 == offset;
         let b = ev_x < 249 || (321 <= ev_x && ev_x < 337);
-        // let b = true;
         let c = ev_y < VFRAME_H || ev_y == PRE_RENDER_LINE;
-        // let c = true;
         a && b && c
     }
 
@@ -810,7 +818,9 @@ impl Ppu {
             v: Cell::default(),
             t: Cell::default(),
             x: Cell::default(),
+            x_scanline: Cell::default(),
             w: Cell::default(),
+            warmup: Cell::new(true),  // Block writes until first VBlank
             dbg_scanline: Cell::default(),
             dbg_dot: Cell::default(),
             ctrl: Cell::default(),
@@ -869,8 +879,10 @@ impl Ppu {
     pub fn write_reg(&self, reg: u16, data: u8) {
         match reg {
             0 => {
-                // $2000 (PPUCTRL):
-                // t: ...GH.. ........ <- d: ......GH (nametable select)
+                // $2000 (PPUCTRL): blocked during warmup
+                if self.warmup.get() {
+                    return;
+                }
                 self.ctrl.set(PpuCtrl::from_bits_truncate(data));
                 let t = self.t.get();
                 let nt = (data as u16 & 0x03) << 10;
@@ -893,7 +905,10 @@ impl Ppu {
                 self.oamaddr.set(next_oamaddr);
             }
             5 => {
-                // $2005 (PPUSCROLL): two writes
+                // $2005 (PPUSCROLL): blocked during warmup
+                if self.warmup.get() {
+                    return;
+                }
                 if !self.w.get() {
                     // First write:
                     // t: ....... ...ABCDE <- d: ABCDE...
@@ -915,7 +930,10 @@ impl Ppu {
                 }
             }
             6 => {
-                // $2006 (PPUADDR): two writes
+                // $2006 (PPUADDR): blocked during warmup
+                if self.warmup.get() {
+                    return;
+                }
                 if !self.w.get() {
                     // First write:
                     // t: .CDEFGH ........ <- d: ..CDEFGH

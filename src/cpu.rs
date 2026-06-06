@@ -21,6 +21,7 @@ pub struct Cpu {
     pub s: Cell<u8>,
     pub p: Cell<Status>,
     pub nmi: Cell<bool>,
+    pub dma_stall: Cell<u32>,  // OAMDMA stall cycles remaining
 }
 
 #[derive(Debug, Clone)]
@@ -65,6 +66,12 @@ bitflags! {
 impl Cpu {
     pub fn run<'a>(nes: &'a Nes) -> impl Coroutine<Yield = CpuStep, Return = !> + 'a {
         #[coroutine] move || loop {
+            // OAMDMA stall: yield pending DMA cycles before next instruction
+            while nes.cpu.dma_stall.get() > 0 {
+                nes.cpu.dma_stall.update(|c| c - 1);
+                yield CpuStep::Cycle;
+            }
+
             if nes.cpu.nmi.get() {
                 nes.cpu.nmi.set(false);
                 let ret_addr = nes.cpu.pc.get();
