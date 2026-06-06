@@ -358,7 +358,8 @@ impl Ppu {
     pub fn calc_bg_pixel_color_sel(nes: &Nes) -> usize {
         let hi_byte = nes.ppu.nt_shift_reg_hi.get();
         let lo_byte = nes.ppu.nt_shift_reg_lo.get();
-        let mask = 0x8000_0000;
+        let fine_x = (nes.ppu.scroll.get() & 0x07) as u32;
+        let mask = 0x8000_0000u32 >> fine_x;
         let hi_bit = (hi_byte & mask) != 0;
         let lo_bit = (lo_byte & mask) != 0;
 
@@ -374,7 +375,8 @@ impl Ppu {
     pub fn calc_bg_pixel_palette_sel(nes: &Nes) -> usize {
         let hi_byte = nes.ppu.at_shift_reg_hi.get();
         let lo_byte = nes.ppu.at_shift_reg_lo.get();
-        let mask = 0x8000_0000;
+        let fine_x = (nes.ppu.scroll.get() & 0x07) as u32;
+        let mask = 0x8000_0000u32 >> fine_x;
         let hi_bit = (hi_byte & mask) != 0;
         let lo_bit = (lo_byte & mask) != 0;
 
@@ -483,10 +485,20 @@ impl Ppu {
     }
 
     pub fn calc_ld_at_addr(nes: &Nes, ld_x: u32, ld_y: u32) -> u16 {
-        let at_x = (ld_x >> 5) % 32;
-        let at_y = (ld_y >> 5) % 32;
-        let at_addr_offset = at_x + at_y * (VFRAME_W >> 5);
-        let at_addr_base = 0x23C0;
+        let scroll = nes.ppu.scroll.get();
+        let scroll_x = (scroll & 0x00FF) as u32;
+        let scroll_y = (scroll >> 8) as u32;
+
+        let x = ld_x + scroll_x;
+        let y = ld_y + scroll_y;
+
+        let at_x = (x >> 5) % 8;
+        let at_y = (y >> 5) % 8;
+        let at_addr_offset = at_x + at_y * 8;
+
+        let nt_h = (x >> 8) & 1;
+        let nt_v = (y >> 8) & 1;
+        let at_addr_base = 0x23C0u32 + nt_h * 0x0400 + nt_v * 0x0800;
         (at_addr_base + at_addr_offset) as u16
     }
 
@@ -523,15 +535,28 @@ impl Ppu {
     }
 
     pub fn calc_ld_nt_addr(nes: &Nes, ld_x: u32, ld_y: u32) -> u16 {
-        let nt_x = (ld_x >> 3) % 32;
-        let nt_y = (ld_y >> 3) % 32;
+        let scroll = nes.ppu.scroll.get();
+        let scroll_x = (scroll & 0x00FF) as u32;
+        let scroll_y = (scroll >> 8) as u32;
+
+        // Apply scroll offsets; determine nametable from overflow
+        let x = ld_x + scroll_x;
+        let y = ld_y + scroll_y;
+
+        let nt_x = (x >> 3) % 32;
+        let nt_y = (y >> 3) % 32;
         let nt_addr_offset = nt_x + nt_y * (VFRAME_W >> 3);
-        let nt_addr_base = 0x2000;
+
+        // Select nametable base based on scroll overflow
+        let nt_h = (x >> 8) & 1; // horizontal nametable select
+        let nt_v = (y >> 8) & 1; // vertical nametable select
+        let nt_addr_base = 0x2000u32 + nt_h * 0x0400 + nt_v * 0x0800;
         (nt_addr_base + nt_addr_offset) as u16
     }
 
     pub fn calc_nt_sprite_addr(nes: &Nes, _ld_x: u32, ld_y: u32, sprite_index: u8) -> u16 {
-        let nt_pattern_dy = (ld_y % 8) as u16;
+        let scroll_y = (nes.ppu.scroll.get() >> 8) as u32;
+        let nt_pattern_dy = ((ld_y + scroll_y) % 8) as u16;
         let nt_pattern_id = (sprite_index as u16) << 4;
         let nt_offset_addr = (nes
             .ppu
