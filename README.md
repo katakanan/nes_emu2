@@ -103,3 +103,7 @@ diff nestest.log /path/to/reference/nestest.log
 - Mapper: NROM (mapper 0) only
 - APU: not implemented (reads return `0xFF`)
 - Audio: not implemented
+
+## License
+
+This project is licensed under the MIT License. See [LICENSE](LICENSE).
