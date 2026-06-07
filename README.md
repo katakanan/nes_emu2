@@ -68,11 +68,25 @@ misc.rs          — yield_all! macro, FPS counter
 
 ## Building
 
-Requires a **nightly** Rust toolchain due to the generator feature.
+Requires a **nightly** Rust toolchain due to the generator feature. The repository
+includes `rust-toolchain.toml`, so `cargo` will automatically use nightly when
+run from this directory.
 
 ```sh
-rustup override set nightly
+cargo build
 cargo build --release
+```
+
+Run a ROM by passing the `.nes` file path:
+
+```sh
+cargo run -- /path/to/game.nes
+```
+
+On WSL, use the X11 backend when opening the emulator window:
+
+```sh
+WINIT_UNIX_BACKEND=x11 cargo run -- /path/to/game.nes
 ```
 
 To run the nestest CPU validation suite:
