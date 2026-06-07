@@ -31,7 +31,6 @@ pub struct Ppu {
     pub v: Cell<u16>,   // current VRAM address (also tile/scroll position)
     pub t: Cell<u16>,   // temporary VRAM address ($2005/$2006/$2000 target)
     pub x: Cell<u8>,    // fine X scroll (3 bits)
-    pub x_scanline: Cell<u8>, // fine X latched at start of each scanline
     pub w: Cell<bool>,  // write toggle (shared by $2005 and $2006)
     pub warmup: Cell<bool>,  // true until first VBlank; blocks $2000/$2005/$2006 writes
     pub vblank_suppress: Cell<bool>,  // set if $2002 read in race window; suppresses next VBlank set + NMI
@@ -402,7 +401,7 @@ impl Ppu {
     pub fn calc_bg_pixel_color_sel(nes: &Nes) -> usize {
         let hi_byte = nes.ppu.nt_shift_reg_hi.get();
         let lo_byte = nes.ppu.nt_shift_reg_lo.get();
-        let fine_x = nes.ppu.x_scanline.get() as u32;
+        let fine_x = nes.ppu.x.get() as u32;
         let mask = 0x8000_0000u32 >> fine_x;
         let hi_bit = (hi_byte & mask) != 0;
         let lo_bit = (lo_byte & mask) != 0;
@@ -419,7 +418,7 @@ impl Ppu {
     pub fn calc_bg_pixel_palette_sel(nes: &Nes) -> usize {
         let hi_byte = nes.ppu.at_shift_reg_hi.get();
         let lo_byte = nes.ppu.at_shift_reg_lo.get();
-        let fine_x = nes.ppu.x_scanline.get() as u32;
+        let fine_x = nes.ppu.x.get() as u32;
         let mask = 0x8000_0000u32 >> fine_x;
         let hi_bit = (hi_byte & mask) != 0;
         let lo_bit = (lo_byte & mask) != 0;
@@ -455,11 +454,6 @@ impl Ppu {
                     let y = scanline as u32;
                     match y {
                         PRE_RENDER_LINE | 0..=VFRAME_END => {
-                            // Latch fine X only at pre-render line (frame start),
-                            // so mid-frame $2005 writes don't affect current frame.
-                            if y == PRE_RENDER_LINE {
-                                nes.ppu.x_scanline.set(nes.ppu.x.get());
-                            }
                             for x in 0..FRAME_W as u32 {
                                 if Ppu::ppu_line_timing(x, y, 1) {
                                     let (ld_x, ld_y) = Ppu::calc_ld_nt_coord(x, y);
@@ -849,7 +843,6 @@ impl Ppu {
             v: Cell::default(),
             t: Cell::default(),
             x: Cell::default(),
-            x_scanline: Cell::default(),
             w: Cell::default(),
             warmup: Cell::new(true),  // Block writes until first VBlank
             vblank_suppress: Cell::new(false),
