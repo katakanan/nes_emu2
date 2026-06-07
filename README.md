@@ -89,6 +89,13 @@ On WSL, use the X11 backend when opening the emulator window:
 WINIT_UNIX_BACKEND=x11 cargo run -- /path/to/game.nes
 ```
 
+Gamepad input is handled through `gilrs`. On Linux/WSL, install the `libudev`
+development package before building:
+
+```sh
+sudo apt-get install pkg-config libudev-dev
+```
+
 To run the nestest CPU validation suite:
 
 ```sh

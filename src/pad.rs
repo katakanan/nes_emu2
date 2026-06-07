@@ -2,7 +2,7 @@ use bitflags::bitflags;
 use std::cell::Cell;
 
 bitflags! {
-    #[derive(Debug, Default, Clone, Copy)]
+    #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
     pub struct PadButton:u8{
         const A = 1 << 0;
         const B = 1 << 1;

@@ -38,7 +38,7 @@ mod misc;
 use misc::FPS;
 use nes::*;
 
-use crate::control::KeyboardInput;
+use crate::control::{GamepadInput, KeyboardInput};
 use crate::ppu::RenderStep;
 
 fn main() -> Result<()> {
@@ -65,8 +65,11 @@ fn main() -> Result<()> {
     let mut view = NESView::new(&nes);
 
     let mut fps = FPS::new();
+    let mut gamepad_input = GamepadInput::new();
 
     while let Some(event) = view.window.next() {
+        gamepad_input.update(&nes);
+
         match event {
             Event::Loop(Loop::Render(_)) => {
                 loop {
